@@ -259,6 +259,51 @@ def solve():
     b_hi.append(last_limit)
 
     # =====================================================
+    # NO MORE THAN 2 CONSECUTIVE SHIFTS IN FIRST HALF
+    # =====================================================
+
+    half = num_shifts // 2
+
+    for si in range(half - 2):
+
+        row = np.zeros(total_vars)
+
+        row[y_idx(si)]     = 1
+        row[y_idx(si + 1)] = 1
+        row[y_idx(si + 2)] = 1
+
+        A_rows.append(row)
+
+        b_lo.append(-np.inf)
+
+        b_hi.append(2)
+
+    # =====================================================
+    # SHIFT UPPER BOUNDS
+    # =====================================================
+
+    for si in range(num_shifts):
+
+        if si == 0:
+            limit = max(100, r1[0])
+
+        elif si == num_shifts - 1:
+            limit = max(100, r1[-1])
+
+        else:
+            limit = 100
+
+        row = np.zeros(total_vars)
+
+        row[v_idx(si)] = 1
+
+        A_rows.append(row)
+
+        b_lo.append(-np.inf)
+
+        b_hi.append(limit)
+
+    # =====================================================
     # SOLVE
     # =====================================================
 
