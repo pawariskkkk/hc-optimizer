@@ -19,7 +19,6 @@ def solve():
     break_start       = data.get("breakStart", 3)
     break_end         = data.get("breakEnd", 5)
     min_shift         = data.get("minShift", 17)
-    last_shift_weight = data.get("lastShiftWeight", 100000)
 
     num_periods = len(r1)
     num_shifts  = num_periods - window_size + 1   # contiguous shifts, like Colab
@@ -54,7 +53,7 @@ def solve():
         c[v_idx(i)] = 1
 
     last_shift = num_shifts - 1
-    c[v_idx(last_shift)] += last_shift_weight
+    
 
     # =====================================================
     # BOUNDS
@@ -74,12 +73,9 @@ def solve():
                 ub[b_idx(i, p)] = 0
 
     # =====================================================
-    # INTEGER VARIABLES (v, y integer; b continuous = faster)
+    # INTEGER VARIABLES (v, y, b integer;)
     # =====================================================
-    integrality = np.zeros(total_vars)
-    for i in range(num_shifts):
-        integrality[v_idx(i)] = 1
-        integrality[y_idx(i)] = 1
+    integrality = np.ones(total_vars)    # everything integer (1)
 
     # =====================================================
     # CONSTRAINTS
