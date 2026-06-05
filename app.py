@@ -13,36 +13,48 @@ def home():
 def solve():
     data = request.get_json()
 
-    r1     = np.array(data["r1"])      # full demand row (keep the zeros)
-    active = data["activeShifts"]      # shift start positions (zeros already filtered out)
+    r1 = np.array(data["r1"])              # trimmed demand (no leading/trailing zeros)
 
-    window_size = data.get("windowSize", 9)
-    break_start = data.get("breakStart", 3)
-    break_end   = data.get("breakEnd", 5)
-    min_shift   = data.get("minShift", 17)
+    window_size       = data.get("windowSize", 9)
+    break_start       = data.get("breakStart", 3)
+    break_end         = data.get("breakEnd", 5)
+    min_shift         = data.get("minShift", 17)
     last_shift_weight = data.get("lastShiftWeight", 100000)
 
     num_periods = len(r1)
-    num_shifts  = len(active)
+    num_shifts  = num_periods - window_size + 1   # contiguous shifts, like Colab
+
+    if num_shifts <= 0:
+        return jsonify({
+            "feasible": False,
+            "message": "Demand stretch shorter than one shift window."
+        })
 
     # =====================================================
-    # VARIABLE INDEX
+    # VARIABLE LAYOUT
+    #   v[i] : i
+    #   b[i,p] : num_shifts + i*num_periods + p
+    #   y[i] : num_shifts + num_shifts*num_periods + i
     # =====================================================
-    def v_idx(si):       return si
-    def y_idx(si):       return num_shifts + si
-    def b_idx(si, p):    return num_shifts * 2 + si * num_periods + p
+    def v_idx(i):    return i
+    def b_idx(i, p): return num_shifts + i * num_periods + p
+    def y_idx(i):    return num_shifts + num_shifts * num_periods + i
 
     total_vars = num_shifts * 2 + num_shifts * num_periods
 
+    # shift i covers period j ?
+    def active_shifts(period):
+        return range(max(0, period - window_size + 1), min(period + 1, num_shifts))
+
     # =====================================================
-    # OBJECTIVE  (minimize workers; push last shift down hard)
+    # OBJECTIVE  (minimize workers; push last shift down)
     # =====================================================
     c = np.zeros(total_vars)
-    for si in range(num_shifts):
-        c[v_idx(si)] = 1
+    for i in range(num_shifts):
+        c[v_idx(i)] = 1
 
-    last_shift_si = num_shifts - 1
-    c[v_idx(last_shift_si)] += last_shift_weight
+    last_shift = num_shifts - 1
+    c[v_idx(last_shift)] += last_shift_weight
 
     # =====================================================
     # BOUNDS
@@ -51,109 +63,101 @@ def solve():
     ub = np.full(total_vars, np.inf)
 
     # y binary
-    for si in range(num_shifts):
-        ub[y_idx(si)] = 1
+    for i in range(num_shifts):
+        ub[y_idx(i)] = 1
 
-    # break windows: b = 0 outside i+3 .. i+5
-    for si, i in enumerate(active):
+    # break windows: b = 0 outside i+break_start .. i+break_end
+    for i in range(num_shifts):
         for p in range(num_periods):
             k = p - i
             if not (break_start <= k <= break_end):
-                ub[b_idx(si, p)] = 0
+                ub[b_idx(i, p)] = 0
 
     # =====================================================
-    # INTEGER VARIABLES (v and y integer; b continuous = faster)
+    # INTEGER VARIABLES (v, y integer; b continuous = faster)
     # =====================================================
     integrality = np.zeros(total_vars)
-    for si in range(num_shifts):
-        integrality[v_idx(si)] = 1
-        integrality[y_idx(si)] = 1
+    for i in range(num_shifts):
+        integrality[v_idx(i)] = 1
+        integrality[y_idx(i)] = 1
 
     # =====================================================
-    # CONSTRAINT STORAGE
+    # CONSTRAINTS
     # =====================================================
-    A_rows, b_lo, b_hi = [], [], []
+    A, b_l, b_u = [], [], []
 
-    # =====================================================
-    # v == 0 OR >= min_shift
-    # =====================================================
+    # 1. v == 0 OR >= min_shift
     BIG_M = 10000
-    for si in range(num_shifts):
+    for i in range(num_shifts):
         # v >= min_shift * y
         row = np.zeros(total_vars)
-        row[v_idx(si)] = 1
-        row[y_idx(si)] = -min_shift
-        A_rows.append(row); b_lo.append(0); b_hi.append(np.inf)
-
+        row[v_idx(i)] = 1
+        row[y_idx(i)] = -min_shift
+        A.append(row); b_l.append(0); b_u.append(np.inf)
         # v <= M * y
         row = np.zeros(total_vars)
-        row[v_idx(si)] = 1
-        row[y_idx(si)] = -BIG_M
-        A_rows.append(row); b_lo.append(-np.inf); b_hi.append(0)
+        row[v_idx(i)] = 1
+        row[y_idx(i)] = -BIG_M
+        A.append(row); b_l.append(-np.inf); b_u.append(0)
 
-    # =====================================================
-    # COVERAGE  (zeros skipped automatically)
-    # =====================================================
+    # 2. COVERAGE  r2[j] >= r1[j]
     for j in range(num_periods):
-        if r1[j] <= 0:
-            continue
         row = np.zeros(total_vars)
-        for si, i in enumerate(active):
-            if i <= j < i + window_size:
-                row[v_idx(si)] = 1
-        A_rows.append(row); b_lo.append(int(r1[j])); b_hi.append(np.inf)
+        for i in active_shifts(j):
+            row[v_idx(i)] = 1
+        A.append(row); b_l.append(int(r1[j])); b_u.append(np.inf)
 
-    # =====================================================
-    # BREAK ASSIGNMENT  (sum of breaks = v[si])
-    # =====================================================
-    for si, i in enumerate(active):
+    # 3. BREAK ASSIGNMENT  sum_p b[i,p] = v[i]
+    for i in range(num_shifts):
         row = np.zeros(total_vars)
-        row[v_idx(si)] = 1
+        row[v_idx(i)] = 1
         for p in range(num_periods):
             k = p - i
             if break_start <= k <= break_end:
-                row[b_idx(si, p)] = -1
-        A_rows.append(row); b_lo.append(0); b_hi.append(0)
+                row[b_idx(i, p)] = -1
+        A.append(row); b_l.append(0); b_u.append(0)
 
-    # =====================================================
-    # BREAK CAPACITY  (breaks at j <= surplus at j)
-    # =====================================================
+    # 4. BREAK CAPACITY  sum_i b[i,j] <= r2[j] - r1[j]
     for j in range(num_periods):
-        if r1[j] <= 0:
-            continue
         row = np.zeros(total_vars)
-        has_breaker = False
-        for si, i in enumerate(active):
-            k = j - i
-            if break_start <= k <= break_end:
-                row[b_idx(si, j)] += 1
-                has_breaker = True
-            if i <= j < i + window_size:
-                row[v_idx(si)] -= 1
-        if not has_breaker:
-            continue
-        A_rows.append(row); b_lo.append(-np.inf); b_hi.append(-int(r1[j]))
+        for i in range(num_shifts):
+            row[b_idx(i, j)] = 1
+        for i in active_shifts(j):
+            row[v_idx(i)] -= 1
+        A.append(row); b_l.append(-np.inf); b_u.append(-int(r1[j]))
 
-    # =====================================================
-    # LIMIT LAST SHIFT
-    # cap it at the demand of the last period it actually covers
-    # (NOT r1[-1], which is a padding zero)
-    # =====================================================
-    last_period_covered = active[-1] + window_size - 1
-    if last_period_covered >= num_periods:
-        last_period_covered = num_periods - 1
-    last_limit = int(r1[last_period_covered])
-
+    # 5. FIX LAST SHIFT to last period's demand
     row = np.zeros(total_vars)
-    row[v_idx(last_shift_si)] = 1
-    A_rows.append(row); b_lo.append(0); b_hi.append(last_limit)
+    row[v_idx(last_shift)] = 1
+    A.append(row); b_l.append(int(r1[-1])); b_u.append(int(r1[-1]))
+
+    # 6. FIRST HALF: MAX 2 CONSECUTIVE ACTIVE SHIFTS
+    half = num_shifts // 2
+    for i in range(half - 2):
+        row = np.zeros(total_vars)
+        row[y_idx(i)]     = 1
+        row[y_idx(i + 1)] = 1
+        row[y_idx(i + 2)] = 1
+        A.append(row); b_l.append(-np.inf); b_u.append(2)
+
+    # 7. SHIFT UPPER BOUNDS
+    for i in range(num_shifts):
+        if i == 0:
+            limit = max(100, int(r1[0]))
+        elif i == num_shifts - 1:
+            limit = max(100, int(r1[-1]))
+        else:
+            limit = 100
+        row = np.zeros(total_vars)
+        row[v_idx(i)] = 1
+        A.append(row); b_l.append(-np.inf); b_u.append(limit)
 
     # =====================================================
     # SOLVE
     # =====================================================
     res = milp(
         c           = c,
-        constraints = LinearConstraint(np.array(A_rows), np.array(b_lo), np.array(b_hi)),
+        constraints = LinearConstraint(np.array(A), np.array(b_l), np.array(b_u)),
         integrality = integrality,
         bounds      = Bounds(lb, ub)
     )
@@ -165,14 +169,12 @@ def solve():
     # EXTRACT
     # =====================================================
     x = res.x
-    v = [int(round(x[v_idx(si)])) for si in range(num_shifts)]
+    v = [int(round(x[v_idx(i)])) for i in range(num_shifts)]
 
-    # BUILD r2 / r3
-    r2 = np.zeros(num_periods)
+    r2 = np.zeros(num_periods, dtype=int)
     for j in range(num_periods):
-        for si, i in enumerate(active):
-            if i <= j < i + window_size:
-                r2[j] += v[si]
+        for i in active_shifts(j):
+            r2[j] += v[i]
     r3 = r2 - r1
 
     return jsonify({
@@ -182,8 +184,7 @@ def solve():
         "r1":             r1.astype(int).tolist(),
         "r2":             r2.astype(int).tolist(),
         "r3":             r3.astype(int).tolist(),
-        "lastShiftValue": int(v[-1]),
-        "lastShiftLimit": last_limit
+        "lastShiftValue": int(v[-1])
     })
 
 if __name__ == "__main__":
