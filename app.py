@@ -15,10 +15,10 @@ def solve():
 
     r1 = np.array(data["r1"])              # trimmed demand (no leading/trailing zeros)
 
-    window_size       = data.get("windowSize", 9)
-    break_start       = data.get("breakStart", 3)
-    break_end         = data.get("breakEnd", 5)
-    min_shift         = data.get("minShift", 17)
+    window_size = data.get("windowSize", 9)
+    break_start = data.get("breakStart", 3)
+    break_end   = data.get("breakEnd", 5)
+    min_shift   = data.get("minShift", 17)
 
     num_periods = len(r1)
     num_shifts  = num_periods - window_size + 1   # contiguous shifts, like Colab
@@ -31,29 +31,34 @@ def solve():
 
     # =====================================================
     # VARIABLE LAYOUT
-    #   v[i] : i
-    #   b[i,p] : num_shifts + i*num_periods + p
-    #   y[i] : num_shifts + num_shifts*num_periods + i
+    #   v[i]    : i
+    #   b[i,p]  : num_shifts + i*num_periods + p
+    #   y[i]    : num_shifts + num_shifts*num_periods + i
+    #   pair[k] : num_shifts*2 + num_shifts*num_periods + k   (k = 0 .. num_shifts-2)
+    #             pair[k] = 1 when shift k and shift k+1 are both active
     # =====================================================
     def v_idx(i):    return i
     def b_idx(i, p): return num_shifts + i * num_periods + p
     def y_idx(i):    return num_shifts + num_shifts * num_periods + i
 
-    total_vars = num_shifts * 2 + num_shifts * num_periods
+    num_pairs   = num_shifts - 1
+    PAIR_OFFSET = num_shifts * 2 + num_shifts * num_periods
+    def pair_idx(k): return PAIR_OFFSET + k
+
+    total_vars = num_shifts * 2 + num_shifts * num_periods + num_pairs
 
     # shift i covers period j ?
     def active_shifts(period):
         return range(max(0, period - window_size + 1), min(period + 1, num_shifts))
 
     # =====================================================
-    # OBJECTIVE  (minimize workers; push last shift down)
+    # OBJECTIVE  (minimize total workers)
     # =====================================================
     c = np.zeros(total_vars)
     for i in range(num_shifts):
         c[v_idx(i)] = 1
 
     last_shift = num_shifts - 1
-    
 
     # =====================================================
     # BOUNDS
@@ -65,6 +70,10 @@ def solve():
     for i in range(num_shifts):
         ub[y_idx(i)] = 1
 
+    # pair binary
+    for k in range(num_pairs):
+        ub[pair_idx(k)] = 1
+
     # break windows: b = 0 outside i+break_start .. i+break_end
     for i in range(num_shifts):
         for p in range(num_periods):
@@ -73,9 +82,9 @@ def solve():
                 ub[b_idx(i, p)] = 0
 
     # =====================================================
-    # INTEGER VARIABLES (v, y, b integer;)
+    # INTEGER VARIABLES (v, b, y, pair all integer)
     # =====================================================
-    integrality = np.ones(total_vars)    # everything integer (1)
+    integrality = np.ones(total_vars)
 
     # =====================================================
     # CONSTRAINTS
@@ -127,16 +136,27 @@ def solve():
     row[v_idx(last_shift)] = 1
     A.append(row); b_l.append(int(r1[-1])); b_u.append(int(r1[-1]))
 
-    # 6. FIRST HALF: MAX 2 CONSECUTIVE ACTIVE SHIFTS
-    half = num_shifts // 2
-    for i in range(half - 2):
+    # 6. AT MOST ONE ADJACENT PAIR OF ACTIVE SHIFTS (whole schedule)
+    #    Anywhere else, no two active shifts may touch.
+    #    The single allowed pair can sit anywhere — first or second half.
+    #
+    #    [a] y[k] + y[k+1] - pair[k] <= 1  → if both active, pair[k] forced to 1
+    #    [b] sum_k pair[k] <= 1            → at most one pair in the whole schedule
+    for k in range(num_pairs):
         row = np.zeros(total_vars)
-        row[y_idx(i)]     = 1
-        row[y_idx(i + 1)] = 1
-        row[y_idx(i + 2)] = 1
-        A.append(row); b_l.append(-np.inf); b_u.append(2)
+        row[y_idx(k)]     = 1
+        row[y_idx(k + 1)] = 1
+        row[pair_idx(k)]  = -1
+        A.append(row); b_l.append(-np.inf); b_u.append(1)
+
+    if num_pairs > 0:
+        row = np.zeros(total_vars)
+        for k in range(num_pairs):
+            row[pair_idx(k)] = 1
+        A.append(row); b_l.append(-np.inf); b_u.append(1)
 
     # 7. SHIFT UPPER BOUNDS
+    #    middle shifts <= 100; first & last capped by their endpoint demand
     for i in range(num_shifts):
         if i == 0:
             limit = max(100, int(r1[0]))
