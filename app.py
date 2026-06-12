@@ -159,11 +159,11 @@ def solve():
     #    middle shifts <= 100; first & last capped by their endpoint demand
     for i in range(num_shifts):
         if i == 0:
-            limit = max(100, int(r1[0]))
+            limit = max(75, int(r1[0]))
         elif i == num_shifts - 1:
-            limit = max(100, int(r1[-1]))
+            limit = max(75, int(r1[-1]))
         else:
-            limit = 100
+            limit = 75
         row = np.zeros(total_vars)
         row[v_idx(i)] = 1
         A.append(row); b_l.append(-np.inf); b_u.append(limit)
