@@ -131,11 +131,7 @@ def solve():
             row[v_idx(i)] -= 1
         A.append(row); b_l.append(-np.inf); b_u.append(-int(r1[j]))
 
-    # 5. FIX LAST SHIFT to last period's demand
-    row = np.zeros(total_vars)
-    row[v_idx(last_shift)] = 1
-    A.append(row); b_l.append(int(r1[-1])); b_u.append(int(r1[-1]))
-
+    
     # 6. AT MOST ONE ADJACENT PAIR OF ACTIVE SHIFTS (whole schedule)
     #    Anywhere else, no two active shifts may touch.
     #    The single allowed pair can sit anywhere — first or second half.
@@ -156,14 +152,12 @@ def solve():
         A.append(row); b_l.append(-np.inf); b_u.append(1)
 
     # 7. SHIFT UPPER BOUNDS
-    #    middle shifts <= 100; first & last capped by their endpoint demand
+    #    cap = max(75, peak demand in this shift's own coverage window)
+    #    → 75 floor in low-demand areas, grows where covered hours need more,
+    #      so the cap can never block coverage for ANY shift.
     for i in range(num_shifts):
-        if i == 0:
-            limit = max(75, int(r1[0]), int(r1[1]))
-        elif i == num_shifts - 1:
-            limit = max(75, int(r1[-1]), int(r1[-2]))
-        else:
-            limit = 75
+        window_peak = max(int(r1[p]) for p in range(i, min(i + window_size, num_periods)))
+        limit = max(75, window_peak)
         row = np.zeros(total_vars)
         row[v_idx(i)] = 1
         A.append(row); b_l.append(-np.inf); b_u.append(limit)
